@@ -201,6 +201,25 @@ timer_interrupt (struct intr_frame *args UNUSED) // Função modificada para o c
       element = list_next(element); // Se não chegou no tempo, vai para o próximo elemento
     }
   }
+
+  // Lógica para implementação do MLFQS
+  if (thread_mlfqs){
+    mlfqs_increment_recent_cpu(); // Incrementa o recent_cpu da thread atual a cada tick
+
+    // A cada segundo, atualiza o load_average e o recent_cpu de todas as threads
+    if (ticks % TIMER_FREQ == 0){
+        mlfqs_load_average();
+        
+        thread_foreach(mlfqs_recent_cpu, NULL); // Aplica a função para todas as threads
+    }
+
+    // A cada 4 ticks, atualiza a prioridade de todas as threads
+    if (ticks % 4 == 0){
+        thread_foreach(mlfqs_priority, NULL); // Aplica a função para todas as threads
+    }
+
+    intr_yield_on_return(); // Verifica se a thread atual deve ceder a CPU
+  }
 }
 
 /* Returns true if LOOPS iterations waits for more than one timer

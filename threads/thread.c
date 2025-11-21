@@ -11,6 +11,9 @@
 #include "threads/switch.h"
 #include "threads/synch.h"
 #include "threads/vaddr.h"
+
+#include "threads/fixed_point.h" // Incluir o cabeçalho de ponto fixo
+
 #ifdef USERPROG
 #include "userprog/process.h"
 #endif
@@ -19,6 +22,8 @@
    Used to detect stack overflow.  See the big comment at the top
    of thread.h for details. */
 #define THREAD_MAGIC 0xcd6abf4b
+
+fixed_t load_average; // Variável que armazena o valor do médio do carregamento do sistema
 
 /* List of processes in THREAD_READY state, that is, processes
    that are ready to run but not actually running. */
@@ -101,6 +106,8 @@ thread_init (void)
   init_thread (initial_thread, "main", PRI_DEFAULT);
   initial_thread->status = THREAD_RUNNING;
   initial_thread->tid = allocate_tid ();
+
+  load_average = 0;
 }
 
 /* Starts preemptive thread scheduling by enabling interrupts.
@@ -240,8 +247,19 @@ thread_unblock (struct thread *t)
 
   old_level = intr_disable ();
   ASSERT (t->status == THREAD_BLOCKED);
+
+  if (thread_mlfqs){ // Se o MLFQS estiver ativo, atualiza a prioridade da thread antes de colocá-la na ready_list
+      mlfqs_priority(t, NULL);
+  
+  }
+
   list_push_back (&ready_list, &t->elem);
   t->status = THREAD_READY;
+
+  if ((thread_current() != idle_thread) && !intr_context() && (t->priority >= thread_current()->priority)){ // Se a thread atual não for a idle, verifica se deve ceder a CPU
+    thread_yield(); // Cede a CPU para a thread recém desbloqueada
+  }
+
   intr_set_level (old_level);
 }
 
@@ -350,33 +368,36 @@ thread_get_priority (void)
 
 /* Sets the current thread's nice value to NICE. */
 void
-thread_set_nice (int nice UNUSED) 
+thread_set_nice (int nice) 
 {
-  /* Not yet implemented. */
+  struct thread *thread = thread_current();
+
+  thread->nice = nice; // Atualiza o valor 'nice' da thread atual
+
+  mlfqs_priority(thread, NULL); // Atualiza a prioridade da thread atual com base no MLFQS
+
+  thread_yield(); // Cede a CPU para outra thread, se necessário
 }
 
 /* Returns the current thread's nice value. */
 int
 thread_get_nice (void) 
 {
-  /* Not yet implemented. */
-  return 0;
+  return thread_current()->nice; // Retorna o valor 'nice' da thread atual
 }
 
 /* Returns 100 times the system load average. */
 int
 thread_get_load_avg (void) 
 {
-  /* Not yet implemented. */
-  return 0;
+  return FIXED_TO_INT_NEAREST(MULT_FIXED_INT(load_average, 100)); // Converte o load_average para inteiro e multiplica por 100
 }
 
 /* Returns 100 times the current thread's recent_cpu value. */
 int
 thread_get_recent_cpu (void) 
 {
-  /* Not yet implemented. */
-  return 0;
+  return FIXED_TO_INT_NEAREST(MULT_FIXED_INT(thread_current()->recent_cpu, 100)); // Converte o recent_cpu para inteiro e multiplica por 100
 }
 
 /* Idle thread.  Executes when no other thread is ready to run.
@@ -467,6 +488,25 @@ init_thread (struct thread *t, const char *name, int priority)
   t->priority = priority;
   t->magic = THREAD_MAGIC;
 
+  if (thread_mlfqs){
+    if (list_empty(&all_list)){ // Se for a primeira thread (inicial)
+      t->recent_cpu = 0; // recent_cpu inicia em 0
+      t->nice = 0; // nice inicia em 0
+    }
+
+    else{
+      struct thread *current_thread = thread_current();
+      t->recent_cpu = current_thread->recent_cpu; // Copia o recent_cpu da thread atual
+      t->nice = current_thread->nice; // Copia o nice da thread atual
+    }
+  }
+
+  else{
+    t->nice = 0; // Inicializa o valor 'nice' como 0
+    t->recent_cpu = 0; // Inicializa o uso recente da CPU como 0
+
+  }
+
   old_level = intr_disable ();
   list_push_back (&all_list, &t->allelem);
   intr_set_level (old_level);
@@ -485,6 +525,13 @@ alloc_frame (struct thread *t, size_t size)
   return t->stack;
 }
 
+static bool thread_priority_less(const struct list_elem *a, const struct list_elem *b, void *auxiliar UNUSED){ // Função de comparação para achar a thread com maior prioridade
+    struct thread *thread_a = list_entry(a, struct thread, elem);
+    struct thread *thread_b = list_entry(b, struct thread, elem);
+
+    return thread_a->priority < thread_b->priority; // Maior prioridade vem primeiro
+}
+
 /* Chooses and returns the next thread to be scheduled.  Should
    return a thread from the run queue, unless the run queue is
    empty.  (If the running thread can continue running, then it
@@ -495,8 +542,13 @@ next_thread_to_run (void)
 {
   if (list_empty (&ready_list))
     return idle_thread;
-  else
-    return list_entry (list_pop_front (&ready_list), struct thread, elem);
+
+  else{ // Modificação para achar a thread com maior prioridade e a remover
+    struct list_elem *max_element = list_max(&ready_list, thread_priority_less, NULL);
+    list_remove(max_element);
+
+    return list_entry (max_element, struct thread, elem);
+  }
 }
 
 /* Completes a thread switch by activating the new thread's page
@@ -585,3 +637,65 @@ allocate_tid (void)
 /* Offset of `stack' member within `struct thread'.
    Used by switch.S, which can't figure it out on its own. */
 uint32_t thread_stack_ofs = offsetof (struct thread, stack);
+
+void mlfqs_priority(struct thread *t, void *auxiliar UNUSED){ // Função que atualiza a prioridade de uma thread com base no MLFQS
+  if (t == idle_thread) {
+      return; // Thread não deve ter recent_cpu atualizado
+  }
+
+  // A prioridade vai ser dada pela subtração da Prioridade Máxima pelo valor do recent_cpu dividido por 4 menos nice vezes 2
+  // priority = PRI_MAX - (recent_cpu / 4) - (nice * 2)
+
+  fixed_t term_1 = DIV_FIXED_INT(t->recent_cpu, 4); 
+  fixed_t term_2 = INT_TO_FIXED(t->nice * 2);
+  fixed_t priority_fixed = SUB_FIXED(SUB_FIXED(INT_TO_FIXED(PRI_MAX), term_1), term_2);
+
+  int priority_int = FIXED_TO_INT_ZERO(priority_fixed);
+
+  if (priority_int > PRI_MAX){
+      t->priority = PRI_MAX;
+  } 
+  
+  else if (priority_int < PRI_MIN){
+      t->priority = PRI_MIN;
+  } 
+  
+  else{
+      t->priority = priority_int;
+  }
+}
+
+void mlfqs_recent_cpu(struct thread *t, void *auxiliar UNUSED){ // Função que atualiza o valor do recent_cpu de uma thread com base no MLFQS
+  if (t == idle_thread) {
+      return; // Thread não deve ter recent_cpu atualizado
+  }
+
+  // coefficiente = (2 * load_average) / (2 * load_average + 1)
+  fixed_t double_load = MULT_FIXED_INT(load_average, 2);
+  fixed_t coefficient = DIV_FIXED(double_load, ADD_FIXED_INT(double_load, 1));
+
+  // recent_cpu = coefficient * recent_cpu + nice
+  t->recent_cpu = ADD_FIXED_INT(MULT_FIXED(coefficient, t->recent_cpu), t->nice);
+}
+
+void mlfqs_load_average(){ // Função que atualiza o valor do load_average com base no MLFQS
+  int ready_threads = list_size(&ready_list); // Número de threads prontas para rodar
+
+  if (thread_current() != idle_thread){
+      ready_threads += 1; // Incluir a thread atual se não for a idle_thread
+  }
+
+  // load_average = (59/60) * load_average + (1/60) * ready_threads
+  fixed_t term_1 = MULT_FIXED(DIV_FIXED_INT(INT_TO_FIXED(59), 60), load_average);
+  fixed_t term_2 = MULT_FIXED_INT(DIV_FIXED_INT(INT_TO_FIXED(1), 60), ready_threads);
+ 
+  load_average = ADD_FIXED(term_1, term_2);
+}
+
+void mlfqs_increment_recent_cpu(){ // Função que incrementa o recent_cpu da thread atual a cada tick
+  if (thread_current() == idle_thread) {
+      return; // Thread não deve ter recent_cpu atualizado
+  }
+
+  thread_current()->recent_cpu = ADD_FIXED_INT(thread_current()->recent_cpu, 1);
+}

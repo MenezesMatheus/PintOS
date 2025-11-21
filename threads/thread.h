@@ -4,6 +4,7 @@
 #include <debug.h>
 #include <list.h>
 #include <stdint.h>
+#include "threads/fixed_point.h" // Incluir o cabeçalho de ponto fixo
 
 /* States in a thread's life cycle. */
 enum thread_status
@@ -91,6 +92,8 @@ struct thread
     struct list_elem allelem;           /* List element for all threads list. */
 
     int64_t wakeup_time; // Váriavel que controla o tempo para o relógio despertar
+    int nice; // Valor 'nice' que quanto maior, mais cede CPU.
+    fixed_t recent_cpu; // Uso recente de CPU, formato ponto-fixo
 
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /* List element. */
@@ -140,5 +143,10 @@ int thread_get_nice (void);
 void thread_set_nice (int);
 int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
+
+void mlfqs_priority(struct thread *t, void *auxiliar); // Função que atualiza a prioridade de uma thread com base no MLFQS
+void mlfqs_recent_cpu(struct thread *t, void *auxiliar); // Função que atualiza o valor do recent_cpu de uma thread com base no MLFQS
+void mlfqs_load_average(void); // Função que atualiza o valor do load_average com base no MLFQS
+void mlfqs_increment_recent_cpu(void); // Função que incrementa o recent_cpu da thread atual a cada tick  
 
 #endif /* threads/thread.h */
