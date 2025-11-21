@@ -250,15 +250,10 @@ thread_unblock (struct thread *t)
 
   if (thread_mlfqs){ // Se o MLFQS estiver ativo, atualiza a prioridade da thread antes de colocá-la na ready_list
       mlfqs_priority(t, NULL);
-  
   }
 
   list_push_back (&ready_list, &t->elem);
   t->status = THREAD_READY;
-
-  if ((thread_current() != idle_thread) && !intr_context() && (t->priority >= thread_current()->priority)){ // Se a thread atual não for a idle, verifica se deve ceder a CPU
-    thread_yield(); // Cede a CPU para a thread recém desbloqueada
-  }
 
   intr_set_level (old_level);
 }
